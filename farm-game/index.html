@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Farm Game</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  font-family: monospace;
+  user-select: none;
+}
+#hud {
+  width: 360px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 4px;
+  color: #fff;
+  font-size: 14px;
+}
+#hud .food { color: #ffdd57; font-size: 16px; font-weight: bold; }
+#hud .season { font-size: 15px; font-weight: bold; }
+#hud .timer { color: #ff9944; }
+canvas {
+  display: block;
+  image-rendering: pixelated;
+  border: 3px solid #444;
+}
+#grow-bar-wrap {
+  width: 360px;
+  height: 12px;
+  background: #333;
+  border-radius: 6px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+#grow-bar {
+  height: 100%;
+  background: #55cc55;
+  border-radius: 6px;
+  transition: width 0.1s;
+}
+#message {
+  margin-top: 14px;
+  color: #fff;
+  font-size: 18px;
+  font-weight: bold;
+  text-align: center;
+  height: 28px;
+}
+#restart-btn {
+  display: none;
+  margin-top: 12px;
+  background: #55cc55;
+  color: #000;
+  border: none;
+  padding: 12px 36px;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: bold;
+  font-family: monospace;
+  cursor: pointer;
+}
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <span class="food">🌾 <span id="food-count">0</span> / 150</span>
+  <span class="season" id="season-text">🌸 봄</span>
+  <span class="timer"><span id="days-left">10</span>일 남음</span>
+</div>
+
+<canvas id="canvas" width="360" height="360"></canvas>
+
+<div id="grow-bar-wrap">
+  <div id="grow-bar" style="width:0%"></div>
+</div>
+
+<div id="message">탭해서 수확하세요!</div>
+<button id="restart-btn" onclick="restart()">다시 시작</button>
+
+<script>
+const COLS = 5;
+const ROWS = 5;
+const CELL = 72;
+const GROW_TIME  = 6700; // 6.7초마다 자람
+const DECAY_TIME =  3100; // 3.1초 안에 못 따면 사라짐
+const PEST_INTERVAL = 4000; // 4초마다 벌레 등장 시도
+const PEST_LIFE     = 2000; // 벌레 2초 안에 안 잡으면 모든 작물 먹힘
+const DAYS_PER_SEASON = 4;
+const FOOD_GOAL = 150;
+const DAY_DURATION = 8000; // 8초 = 하루
+
+const SEASONS = [
+  { name: '🌸 봄',  bg: '#2d5a1b', grid: '#1e3d12' },
+  { name: '☀️ 여름', bg: '#1a3d0a', grid: '#112808' },
+  { name: '🍂 가을', bg: '#5a3a1b', grid: '#3d2710' },
+  { name: '❄️ 겨울', bg: '#1a2a3d', grid: '#111e2d' },
+];
+
+const state = {
+  cells: [],
+  food: 0,
+  year: 1,
+  day: 1,
+  season: 0, // 0=봄 1=여름 2=가을 3=겨울
+  running: true,
+};
+
+function initCells() {
+  state.cells = [];
+  for (let i = 0; i < COLS * ROWS; i++) {
+    state.cells.push({
+      grown: false,
+      plantedAt: Date.now() + Math.random() * 5000,
+      grownAt: null,
+      pest: false,
+      pestAt: null,
+    });
+  }
+}
+
+function restart() {
+  state.food = 0;
+  state.year = 1;
+  state.day = 1;
+  state.season = 0;
+  state.running = true;
+  lastDayTick = Date.now();
+  lastPestTick = Date.now();
+  growStart = null;
+  initCells();
+  document.getElementById('restart-btn').style.display = 'none';
+  document.getElementById('message').textContent = '탭해서 수확하세요!';
+  loop();
+}
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let lastTouch = 0;
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  lastTouch = Date.now();
+  const t = e.changedTouches[0];
+  const rect = canvas.getBoundingClientRect();
+  handleTap(t.clientX - rect.left, t.clientY - rect.top);
+}, { passive: false });
+
+canvas.addEventListener('click', e => {
+  if (Date.now() - lastTouch < 500) return;
+  const rect = canvas.getBoundingClientRect();
+  handleTap(e.clientX - rect.left, e.clientY - rect.top);
+});
+
+function handleTap(x, y) {
+  if (!state.running) return;
+  const col = Math.floor(x / CELL);
+  const row = Math.floor(y / CELL);
+  const idx = row * COLS + col;
+  if (idx < 0 || idx >= state.cells.length) return;
+  const cell = state.cells[idx];
+  if (cell.pest) {
+    // 벌레 쫓아내기
+    cell.pest = false;
+    cell.pestAt = null;
+    showMessage('🐛 잡았다!');
+  } else if (cell.grown) {
+    cell.grown = false;
+    cell.grownAt = null;
+    cell.plantedAt = Date.now();
+    state.food++;
+    showMessage('+1 🌾');
+  }
+}
+
+function showMessage(text) {
+  const el = document.getElementById('message');
+  el.textContent = text;
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => {
+    if (state.running) el.textContent = '탭해서 수확하세요!';
+  }, 600);
+}
+
+function advanceDay() {
+  state.day++;
+  if (state.day > DAYS_PER_SEASON) {
+    state.day = 1;
+    state.season++;
+    if (state.season === 3) {
+      // 겨울 시작 — 즉시 판정
+      if (state.food >= FOOD_GOAL) {
+        state.season = 0;
+        state.year++;
+        state.food = 0;
+        showMessage(`🌸 ${state.year}년차 봄! 다시 시작!`);
+      } else {
+        state.running = false;
+        document.getElementById('message').textContent = `❄️ 식량 부족! ${state.food}/${FOOD_GOAL}`;
+        document.getElementById('restart-btn').style.display = 'inline-block';
+      }
+    } else {
+      showMessage(`${SEASONS[state.season].name} 시작!`);
+    }
+  }
+}
+
+function updateHUD(growPct) {
+  const s = SEASONS[state.season];
+  document.getElementById('food-count').textContent = state.food;
+  document.getElementById('season-text').textContent = `${s.name} · ${state.year}년차`;
+  const daysToWinter = (2 - state.season) * DAYS_PER_SEASON + (DAYS_PER_SEASON - state.day + 1);
+  document.getElementById('days-left').textContent = Math.max(0, daysToWinter);
+  document.getElementById('grow-bar').style.width = growPct + '%';
+}
+
+function drawCell(col, row, cell, now) {
+  const x = col * CELL;
+  const y = row * CELL;
+
+  let main, dark, emoji = null;
+
+  if (cell.grown) {
+    // 남은 시간에 따라 초록 → 노랑 → 빨강
+    const age = now - cell.grownAt;
+    const ratio = age / DECAY_TIME;
+    if (ratio < 0.5) {
+      main = '#55cc55'; dark = '#33aa33';
+    } else if (ratio < 0.8) {
+      main = '#ccaa22'; dark = '#997700';
+    } else {
+      main = '#cc4444'; dark = '#aa2222';
+    }
+    emoji = '🌾';
+  } else {
+    main = '#8B5E3C'; dark = '#6B4423';
+  }
+
+  ctx.fillStyle = main;
+  ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+  ctx.fillStyle = dark;
+  ctx.fillRect(x + 1, y + CELL - 5, CELL - 2, 4);
+  ctx.fillRect(x + CELL - 5, y + 1, 4, CELL - 2);
+
+  if (emoji) {
+    ctx.font = `${CELL * 0.55}px serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(emoji, x + CELL / 2, y + CELL / 2);
+  }
+  // 벌레 표시
+  if (cell.pest) {
+    ctx.font = `${CELL * 0.35}px serif`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillText('🐛', x + CELL - 4, y + 4);
+  }
+}
+
+function drawGrid(now) {
+  const s = SEASONS[state.season];
+  ctx.fillStyle = s.grid;
+  ctx.fillRect(0, 0, 360, 360);
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      drawCell(c, r, state.cells[r * COLS + c], now);
+    }
+  }
+}
+
+let lastDayTick = Date.now();
+let lastPestTick = Date.now();
+let growStart = null; // 수확 다 끝난 후 타이머 시작
+
+function loop() {
+  if (!state.running) return;
+  const now = Date.now();
+
+  const isWinter = state.season === 3;
+
+  // 겨울엔 모든 작물 제거
+  if (isWinter) {
+    for (const cell of state.cells) {
+      if (cell.grown) { cell.grown = false; cell.grownAt = null; }
+    }
+    growStart = null;
+  } else {
+    const anyGrown = state.cells.some(c => c.grown);
+
+    if (!anyGrown) {
+      // 수확 완료 → 타이머 시작
+      if (growStart === null) growStart = now;
+
+      if (now - growStart >= GROW_TIME) {
+        // 새 작물 한꺼번에 등장
+        for (const cell of state.cells) {
+          cell.grown = true;
+          cell.grownAt = now;
+        }
+        growStart = null;
+      }
+    }
+  }
+
+  // 벌레 처리
+  for (const cell of state.cells) {
+    if (cell.pest && now - cell.pestAt >= PEST_LIFE) {
+      // 모든 작물 전멸
+      for (const c of state.cells) {
+        c.pest = false;
+        c.pestAt = null;
+        c.grown = false;
+        c.grownAt = null;
+        c.plantedAt = now;
+      }
+      growStart = null;
+      showMessage('🐛 모든 작물이 먹혔어!');
+      break;
+    }
+  }
+  // 벌레 등��� (한번에 1~3마리)
+  if (!isWinter && now - lastPestTick >= PEST_INTERVAL) {
+    lastPestTick = now;
+    const grownCells = state.cells.filter(c => c.grown && !c.pest);
+    if (grownCells.length > 0) {
+      const count = Math.min(Math.floor(Math.random() * 3) + 1, grownCells.length);
+      const shuffled = grownCells.sort(() => Math.random() - 0.5);
+      for (let i = 0; i < count; i++) {
+        shuffled[i].pest = true;
+        shuffled[i].pestAt = now;
+      }
+    }
+  }
+
+  if (now - lastDayTick >= DAY_DURATION) {
+    lastDayTick = now;
+    advanceDay();
+  }
+
+  // 성장 진행률
+  const growPct = growStart !== null
+    ? Math.min(100, ((now - growStart) / GROW_TIME) * 100)
+    : 0;
+
+  drawGrid(now);
+  updateHUD(growPct);
+
+  requestAnimationFrame(loop);
+}
+
+initCells();
+loop();
+</script>
+</body>
+</html>
